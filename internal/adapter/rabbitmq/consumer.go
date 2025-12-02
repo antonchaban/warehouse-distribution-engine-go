@@ -11,8 +11,9 @@ import (
 )
 
 // DistributionService defines the contract we need from the app layer.
+// Updated to accept supplyID based on Spec v2.
 type DistributionService interface {
-	CalculateDistribution(ctx context.Context, requestID string) error
+	CalculateDistribution(ctx context.Context, requestID string, supplyID int64) error
 }
 
 // Consumer handles RabbitMQ connection and message processing.
@@ -34,9 +35,10 @@ func NewConsumer(url, queueName string, svc DistributionService, l *slog.Logger)
 }
 
 // MessageBody represents the expected JSON payload from the queue.
-// According to spec: "Trigger... contains only Request ID and parameters".
+// Updated for Spec v2: now includes supply_id.
 type MessageBody struct {
 	RequestID string `json:"request_id"`
+	SupplyID  int64  `json:"supply_id"`
 }
 
 // Start begins listening for messages. This is a blocking operation.
@@ -106,27 +108,38 @@ func (c *Consumer) Start(ctx context.Context) error {
 func (c *Consumer) handleMessage(ctx context.Context, d amqp.Delivery) {
 	var body MessageBody
 	if err := json.Unmarshal(d.Body, &body); err != nil {
-		c.logger.Error("failed to unmarshal message", "error", err)
+		c.logger.Error("critical error: failed to unmarshal message", "error", err)
 		// If JSON is invalid, retrying won't help. Reject without requeue.
 		_ = d.Nack(false, false)
 		return
 	}
 
-	c.logger.Info("received calculation request", "request_id", body.RequestID)
+	c.logger.Info("received calculation request",
+		"request_id", body.RequestID,
+		"supply_id", body.SupplyID,
+		"attempt", d.Redelivered,
+	)
 
 	// Set a timeout for the calculation logic
 	calcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// CALL THE APP LAYER
-	err := c.service.CalculateDistribution(calcCtx, body.RequestID)
+	// We pass the SupplyID so the service knows what items to fetch.
+	err := c.service.CalculateDistribution(calcCtx, body.RequestID, body.SupplyID)
 
 	if err != nil {
 		c.logger.Error("calculation failed", "request_id", body.RequestID, "error", err)
-		// Logic: Should we requeue?
-		// For now, let's Nack with requeue=true so another worker can try (transient error),
-		// or requeue=false if it's a permanent error.
-		// Let's assume transient for DB issues.
+
+		// --- BACKOFF STRATEGY ---
+		// If this message was already delivered before, it means we are in a retry loop.
+		// We MUST wait before sending it back to the queue to avoid DDoS-ing ourselves/Java service.
+		if d.Redelivered {
+			c.logger.Warn("message was already redelivered, sleeping before requeue", "request_id", body.RequestID)
+			time.Sleep(5 * time.Second) // Simple 5s delay
+		}
+
+		// Nack with requeue=true so another worker can try (transient error)
 		_ = d.Nack(false, true)
 	} else {
 		// Success! Acknowledge the message.

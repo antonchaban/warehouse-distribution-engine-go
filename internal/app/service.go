@@ -14,8 +14,9 @@ type StateProvider interface {
 	// FetchWorldState retrieves the current state of all warehouses.
 	FetchWorldState(ctx context.Context) ([]*algorithm.Warehouse, error)
 
-	// FetchPendingItems retrieves the products that need to be distributed.
-	FetchPendingItems(ctx context.Context) ([]algorithm.Product, error)
+	// FetchPendingItems retrieves the products associated with a specific Supply ID.
+	// Updated for Spec v2.
+	FetchPendingItems(ctx context.Context, supplyID int64) ([]algorithm.Product, error)
 }
 
 // ResultSender defines the contract for sending the calculation result.
@@ -50,8 +51,11 @@ func NewService(
 
 // CalculateDistribution executes the full distribution cycle.
 // Flow: Load Data -> Run Algorithm -> Send Result.
-func (s *Service) CalculateDistribution(ctx context.Context, requestID string) error {
-	s.logger.Info("starting distribution calculation", "request_id", requestID)
+func (s *Service) CalculateDistribution(ctx context.Context, requestID string, supplyID int64) error {
+	s.logger.Info("starting distribution calculation",
+		"request_id", requestID,
+		"supply_id", supplyID,
+	)
 
 	// STEP 1: Load Data (IO Bound).
 	// We fetch the current state from the database via the adapter.
@@ -60,7 +64,8 @@ func (s *Service) CalculateDistribution(ctx context.Context, requestID string) e
 		return fmt.Errorf("failed to fetch world state: %w", err)
 	}
 
-	items, err := s.provider.FetchPendingItems(ctx)
+	// We fetch specific items for this supply batch
+	items, err := s.provider.FetchPendingItems(ctx, supplyID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch pending items: %w", err)
 	}
