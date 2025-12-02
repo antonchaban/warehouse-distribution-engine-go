@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package distribution;
+
+// This defines the Go package path for the generated code
+option go_package = "github.com/antonchaban/warehouse-distribution-engine-go/gen/go/distribution";
+
+// Service defined in the Java application that accepts our results
+service DistributionResultReceiver {
+  // ProcessPlan accepts the calculated plan from the Go engine
+  rpc ProcessPlan (DistributionPlan) returns (Empty);
+}
+
+message Empty {}
+
+message DistributionPlan {
+  string request_id = 1;
+  repeated Move moves = 2;
+  repeated UnallocatedItem unallocated_items = 3;
+}
+
+message Move {
+  string product_id = 1;
+  string warehouse_id = 2;
+  double volume_m3 = 3;
+}
+
+message UnallocatedItem {
+  string product_id = 1;
+  double volume_m3 = 2;
+  string reason = 3; // e.g. "No capacity"
+}
