@@ -11,7 +11,6 @@ import (
 )
 
 // DistributionService defines the contract we need from the app layer.
-// Updated to accept supplyID based on Spec v2.
 type DistributionService interface {
 	CalculateDistribution(ctx context.Context, requestID string, supplyID int64) error
 }
@@ -24,7 +23,6 @@ type Consumer struct {
 	logger  *slog.Logger
 }
 
-// NewConsumer creates a new RabbitMQ consumer instance.
 func NewConsumer(url, queueName string, svc DistributionService, l *slog.Logger) *Consumer {
 	return &Consumer{
 		connURL: url,
@@ -34,23 +32,49 @@ func NewConsumer(url, queueName string, svc DistributionService, l *slog.Logger)
 	}
 }
 
-// MessageBody represents the expected JSON payload from the queue.
-// Updated for Spec v2: now includes supply_id.
+// MessageBody updated according to Spec v3.
+// Contains audit info: who initiated the calculation.
 type MessageBody struct {
-	RequestID string `json:"request_id"`
-	SupplyID  int64  `json:"supply_id"`
+	RequestID           string `json:"request_id"`
+	SupplyID            int64  `json:"supply_id"`
+	SourceWarehouseID   int64  `json:"source_warehouse_id"`
+	InitiatedByUserId   int64  `json:"initiated_by_user_id"`  // NEW
+	InitiatedByUsername string `json:"initiated_by_username"` // NEW
 }
 
-// Start begins listening for messages. This is a blocking operation.
 func (c *Consumer) Start(ctx context.Context) error {
 	c.logger.Info("connecting to rabbitmq", "url", c.connURL)
 
-	// 1. Connect to RabbitMQ
-	conn, err := amqp.Dial(c.connURL)
+	var conn *amqp.Connection
+	var err error
+
+	// --- FIX: RETRY LOGIC (Resilience) ---
+	// Пробуємо підключитися 10 разів з інтервалом 2 секунди.
+	// Це дасть RabbitMQ 20 секунд на повний старт.
+	for i := 0; i < 15; i++ {
+		conn, err = amqp.Dial(c.connURL)
+		if err == nil {
+			c.logger.Info("successfully connected to rabbitmq")
+			break
+		}
+
+		c.logger.Warn("failed to connect to rabbitmq, retrying in 2s...",
+			"attempt", i+1,
+			"error", err)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+			continue
+		}
+	}
+
 	if err != nil {
-		return fmt.Errorf("failed to connect to rabbitmq: %w", err)
+		return fmt.Errorf("failed to connect to rabbitmq after retries: %w", err)
 	}
 	defer conn.Close()
+	// -------------------------------------
 
 	ch, err := conn.Channel()
 	if err != nil {
@@ -59,7 +83,6 @@ func (c *Consumer) Start(ctx context.Context) error {
 	defer ch.Close()
 
 	// 2. Declare Queue (Idempotent)
-	// We ensure the queue exists before listening.
 	_, err = ch.QueueDeclare(
 		c.queue, // name
 		true,    // durable
@@ -75,8 +98,8 @@ func (c *Consumer) Start(ctx context.Context) error {
 	// 3. Start Consuming
 	msgs, err := ch.Consume(
 		c.queue, // queue
-		"",      // consumer tag (empty = auto-generated)
-		false,   // auto-ack (FALSE! We want manual ack after processing)
+		"",      // consumer tag
+		false,   // auto-ack (FALSE!)
 		false,   // exclusive
 		false,   // no-local
 		false,   // no-wait
@@ -98,8 +121,6 @@ func (c *Consumer) Start(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("rabbitmq channel closed")
 			}
-
-			// Process the message in a separate function to handle Acks correctly
 			c.handleMessage(ctx, d)
 		}
 	}
@@ -109,40 +130,31 @@ func (c *Consumer) handleMessage(ctx context.Context, d amqp.Delivery) {
 	var body MessageBody
 	if err := json.Unmarshal(d.Body, &body); err != nil {
 		c.logger.Error("critical error: failed to unmarshal message", "error", err)
-		// If JSON is invalid, retrying won't help. Reject without requeue.
-		_ = d.Nack(false, false)
+		_ = d.Nack(false, false) // Discard invalid JSON
 		return
 	}
 
+	// AUDIT LOGGING: Critical for traceability [Spec v3]
 	c.logger.Info("received calculation request",
 		"request_id", body.RequestID,
 		"supply_id", body.SupplyID,
+		"user_id", body.InitiatedByUserId, // Log WHO did it
+		"username", body.InitiatedByUsername, // Log WHO did it
 		"attempt", d.Redelivered,
 	)
 
-	// Set a timeout for the calculation logic
 	calcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// CALL THE APP LAYER
-	// We pass the SupplyID so the service knows what items to fetch.
 	err := c.service.CalculateDistribution(calcCtx, body.RequestID, body.SupplyID)
 
 	if err != nil {
 		c.logger.Error("calculation failed", "request_id", body.RequestID, "error", err)
-
-		// --- BACKOFF STRATEGY ---
-		// If this message was already delivered before, it means we are in a retry loop.
-		// We MUST wait before sending it back to the queue to avoid DDoS-ing ourselves/Java service.
 		if d.Redelivered {
-			c.logger.Warn("message was already redelivered, sleeping before requeue", "request_id", body.RequestID)
-			time.Sleep(5 * time.Second) // Simple 5s delay
+			time.Sleep(5 * time.Second) // Backoff strategy
 		}
-
-		// Nack with requeue=true so another worker can try (transient error)
 		_ = d.Nack(false, true)
 	} else {
-		// Success! Acknowledge the message.
 		if err := d.Ack(false); err != nil {
 			c.logger.Error("failed to ack message", "error", err)
 		}

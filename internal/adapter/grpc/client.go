@@ -54,6 +54,7 @@ func (c *Client) SendPlan(ctx context.Context, plan algorithm.DistributionPlan) 
 			ProductId:   m.ProductID,
 			WarehouseId: m.WarehouseID,
 			VolumeM3:    m.VolumeM3,
+			Quantity:    1,
 		})
 	}
 

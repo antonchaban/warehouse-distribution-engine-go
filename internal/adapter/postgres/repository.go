@@ -19,10 +19,8 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 }
 
 // FetchWorldState loads the entire network state into domain models.
-// It executes a complex aggregated query to minimize network traffic.
+// Updated for Spec v2: includes 'PLANNED' shipments in capacity calculation.
 func (r *Repository) FetchWorldState(ctx context.Context) ([]*algorithm.Warehouse, error) {
-	// SQL Query Design:
-	// We use CTEs to aggregate stock and incoming shipments separately to avoid Cartesian products.
 	const query = `
 	WITH stock_agg AS (
 		SELECT 
@@ -39,7 +37,8 @@ func (r *Repository) FetchWorldState(ctx context.Context) ([]*algorithm.Warehous
 		FROM shipments s
 		JOIN shipment_items si ON s.id = si.shipment_id
 		JOIN products p ON si.product_id = p.id
-		WHERE s.status = 'IN_TRANSIT'
+		-- Critical update: Include PLANNED shipments in capacity check (Spec v2)
+		WHERE s.status IN ('IN_TRANSIT', 'PLANNED')
 		GROUP BY s.destination_id
 	)
 	SELECT 
@@ -82,23 +81,21 @@ func (r *Repository) FetchWorldState(ctx context.Context) ([]*algorithm.Warehous
 }
 
 // FetchPendingItems retrieves items that need to be distributed.
-// This implements the missing method of the StateProvider interface.
-func (r *Repository) FetchPendingItems(ctx context.Context) ([]algorithm.Product, error) {
-	// We assume there are shipments with status 'PENDING' containing items to distribute.
-	// We join with the products table to get dimensions.
+// FIXED: Now accepts supplyID (int64) to match the interface signature.
+func (r *Repository) FetchPendingItems(ctx context.Context, supplyID int64) ([]algorithm.Product, error) {
+	// Updated query: Read from supply_items based on the supply_id received from RabbitMQ
 	const query = `
 		SELECT 
 			p.id,
 			p.volume_m3,
 			si.quantity,
-			10 as priority -- Default priority (could be fetched from products or orders)
-		FROM shipment_items si
+			10 as priority -- Default priority
+		FROM supply_items si
 		JOIN products p ON si.product_id = p.id
-		JOIN shipments s ON si.shipment_id = s.id
-		WHERE s.status = 'PENDING'
+		WHERE si.supply_id = $1
 	`
 
-	rows, err := r.pool.Query(ctx, query)
+	rows, err := r.pool.Query(ctx, query, supplyID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query pending items: %w", err)
 	}
@@ -106,8 +103,6 @@ func (r *Repository) FetchPendingItems(ctx context.Context) ([]algorithm.Product
 
 	var items []algorithm.Product
 
-	// Iterate over rows. Note: A row represents a "Batch" (e.g., "iPhone x 50").
-	// The algorithm works with individual items, so we must expand the quantity.
 	for rows.Next() {
 		var (
 			productID string
@@ -117,7 +112,7 @@ func (r *Repository) FetchPendingItems(ctx context.Context) ([]algorithm.Product
 		)
 
 		if err := rows.Scan(&productID, &volume, &quantity, &priority); err != nil {
-			return nil, fmt.Errorf("failed to scan pending item: %w", err)
+			return nil, fmt.Errorf("failed to scan supply item: %w", err)
 		}
 
 		// Expand quantity into individual items for the Bin Packing algorithm
