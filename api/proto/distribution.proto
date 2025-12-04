@@ -23,6 +23,7 @@ message Move {
   string product_id = 1;
   string warehouse_id = 2;
   double volume_m3 = 3;
+  int32 quantity = 4;
 }
 
 message UnallocatedItem {

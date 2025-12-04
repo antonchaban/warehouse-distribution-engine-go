@@ -122,6 +122,7 @@ type Move struct {
 	ProductId     string                 `protobuf:"bytes,1,opt,name=product_id,json=productId,proto3" json:"product_id,omitempty"`
 	WarehouseId   string                 `protobuf:"bytes,2,opt,name=warehouse_id,json=warehouseId,proto3" json:"warehouse_id,omitempty"`
 	VolumeM3      float64                `protobuf:"fixed64,3,opt,name=volume_m3,json=volumeM3,proto3" json:"volume_m3,omitempty"`
+	Quantity      int32                  `protobuf:"varint,4,opt,name=quantity,proto3" json:"quantity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -173,6 +174,13 @@ func (x *Move) GetWarehouseId() string {
 func (x *Move) GetVolumeM3() float64 {
 	if x != nil {
 		return x.VolumeM3
+	}
+	return 0
+}
+
+func (x *Move) GetQuantity() int32 {
+	if x != nil {
+		return x.Quantity
 	}
 	return 0
 }
@@ -247,12 +255,13 @@ const file_distribution_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12(\n" +
 	"\x05moves\x18\x02 \x03(\v2\x12.distribution.MoveR\x05moves\x12J\n" +
-	"\x11unallocated_items\x18\x03 \x03(\v2\x1d.distribution.UnallocatedItemR\x10unallocatedItems\"e\n" +
+	"\x11unallocated_items\x18\x03 \x03(\v2\x1d.distribution.UnallocatedItemR\x10unallocatedItems\"\x81\x01\n" +
 	"\x04Move\x12\x1d\n" +
 	"\n" +
 	"product_id\x18\x01 \x01(\tR\tproductId\x12!\n" +
 	"\fwarehouse_id\x18\x02 \x01(\tR\vwarehouseId\x12\x1b\n" +
-	"\tvolume_m3\x18\x03 \x01(\x01R\bvolumeM3\"e\n" +
+	"\tvolume_m3\x18\x03 \x01(\x01R\bvolumeM3\x12\x1a\n" +
+	"\bquantity\x18\x04 \x01(\x05R\bquantity\"e\n" +
 	"\x0fUnallocatedItem\x12\x1d\n" +
 	"\n" +
 	"product_id\x18\x01 \x01(\tR\tproductId\x12\x1b\n" +
