@@ -47,17 +47,43 @@ func (c *Client) Close() error {
 // SendPlan converts the domain model to Proto and sends it over the wire.
 // This satisfies the app.ResultSender interface.
 func (c *Client) SendPlan(ctx context.Context, plan algorithm.DistributionPlan) error {
-	// 1. Map Domain -> Proto
-	protoMoves := make([]*pb.Move, 0, len(plan.Moves))
+	// 1. АГРЕГАЦІЯ: Групуємо однакові переміщення
+	// Ключ мапи: "WarehouseID|ProductID" -> Кількість
+	type moveKey struct {
+		WarehouseID string
+		ProductID   string
+	}
+
+	// Зберігаємо об'єм та кількість для кожного маршруту
+	aggregated := make(map[moveKey]struct {
+		Count    int32
+		VolumeM3 float64
+	})
+
 	for _, m := range plan.Moves {
+		key := moveKey{
+			WarehouseID: m.WarehouseID,
+			ProductID:   m.ProductID,
+		}
+
+		current := aggregated[key]
+		current.Count++
+		current.VolumeM3 = m.VolumeM3 // Об'єм одиниці товару однаковий
+		aggregated[key] = current
+	}
+
+	// 2. Map Domain -> Proto (вже згрупований)
+	protoMoves := make([]*pb.Move, 0, len(aggregated))
+	for key, data := range aggregated {
 		protoMoves = append(protoMoves, &pb.Move{
-			ProductId:   m.ProductID,
-			WarehouseId: m.WarehouseID,
-			VolumeM3:    m.VolumeM3,
-			Quantity:    1,
+			ProductId:   key.ProductID,
+			WarehouseId: key.WarehouseID,
+			VolumeM3:    data.VolumeM3,
+			Quantity:    data.Count, // <-- Тут буде реальна сума (напр. 50)
 		})
 	}
 
+	// ... (Unallocated items залишаються як були)
 	protoUnallocated := make([]*pb.UnallocatedItem, 0, len(plan.UnallocatedItems))
 	for _, u := range plan.UnallocatedItems {
 		protoUnallocated = append(protoUnallocated, &pb.UnallocatedItem{
@@ -68,16 +94,12 @@ func (c *Client) SendPlan(ctx context.Context, plan algorithm.DistributionPlan) 
 	}
 
 	req := &pb.DistributionPlan{
-		// Note: request_id should ideally be passed through from the input event.
-		// For now, we assume it's part of the context or passed separately,
-		// but let's leave it empty or update the interface if needed.
-		RequestId:        "generated-id",
+		RequestId:        "generated-id-placeholder", // Java його проігнорує або візьме з контексту
 		Moves:            protoMoves,
 		UnallocatedItems: protoUnallocated,
 	}
 
-	// 2. Network Call with Timeout
-	// Always set a short timeout for RPC calls to avoid cascading failures.
+	// 3. Network Call
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 

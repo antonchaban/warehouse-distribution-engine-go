@@ -60,7 +60,6 @@ type Move struct {
 	ProductID   string
 	WarehouseID string
 	VolumeM3    float64
-	Quantity    int32
 }
 
 // DistributionPlan is the final result of the algorithm.
